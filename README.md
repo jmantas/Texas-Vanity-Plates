@@ -9,10 +9,13 @@ Incapsula bot protection, which blocks raw HTTP requests with 403 errors.
 ## Quick Start
 
 ```bash
-pip install playwright
-playwright install chromium
-python3 plate_checker.py
+./run.sh
 ```
+
+That's it. The script creates a Python virtual environment, installs
+Playwright + Chromium, and runs the checker automatically.
+
+All arguments are forwarded, e.g. `./run.sh --max-plates 30`
 
 ## Features
 
