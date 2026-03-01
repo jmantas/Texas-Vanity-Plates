@@ -1,0 +1,29 @@
+{
+  "timestamp": "2026-03-01T21:00:42.395415",
+  "plate_style": "classic-black-silver",
+  "style_name": "Classic Black & Silver",
+  "total_ideas": 5,
+  "total_checked": 3,
+  "summary": {
+    "available": 0,
+    "unavailable": 0,
+    "blocked": 0,
+    "errors": 3
+  },
+  "available_plates": [],
+  "unavailable_plates": [],
+  "errors": [
+    {
+      "plate": "AIEXEC",
+      "error": "Network restricted (run locally for full access)"
+    },
+    {
+      "plate": "ATXTEK",
+      "error": "Network restricted (run locally for full access)"
+    },
+    {
+      "plate": "BIZTRN",
+      "error": "Network restricted (run locally for full access)"
+    }
+  ]
+}
