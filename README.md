@@ -19,39 +19,56 @@ All arguments are forwarded, e.g. `./run.sh --max-plates 30`
 
 ## Features
 
-- **131+ personalized plate ideas** across 11 categories (Tech/AI, Heritage,
+- **Generate 500 plates from any description** — give it a paragraph about your
+  interests and get 500 creative vanity plate candidates
+- **131+ built-in plate ideas** across 11 categories (Tech/AI, Heritage,
   Leadership, Crypto, Aviation, and more)
-- **Uniqueness scoring** — plates sorted by likelihood of availability (most
-  niche first)
+- **Wow factor scoring** — plates ranked by creativity, readability, and uniqueness
 - **Playwright browser engine** — uses a real browser to bypass Incapsula WAF
 - **Rate-limited requests** — respects myplates.com with configurable delays
 - **Incapsula bot detection** — auto-stops when blocked, avoids bans
-- **JSON export** — full results saved to `results.json`
+- **JSON export** — results sorted by wow factor saved to `results.json`
 
 ## Usage
 
 ```bash
-# Check all 131+ plates (takes ~5 minutes at default 1.5s delay)
-python3 plate_checker.py
+# ── Generate plates from a description ──────────────────────
+# Produces 500 plate ideas and saves them to input.json
+python3 plate_checker.py --generate "I love technology, AI, fast cars, and aviation"
 
-# Check the top 30 most unique/niche plates
-python3 plate_checker.py --max-plates 30
+# ── Check plates from a file ───────────────────────────────
+# Loads input.json and checks availability on myplates.com
+python3 plate_checker.py --input input.json
 
-# Preview all plate ideas without checking availability
-python3 plate_checker.py --list-only
+# Check only the top 50 (sorted by wow factor)
+python3 plate_checker.py --input input.json --max-plates 50
 
-# Slower checking to avoid Incapsula blocks
-python3 plate_checker.py --delay 3.0
+# ── Built-in plates (original mode) ────────────────────────
+python3 plate_checker.py                    # Check all 131+ built-in plates
+python3 plate_checker.py --max-plates 30    # Top 30 most unique
+python3 plate_checker.py --list-only        # Preview without checking
 
-# Add your own custom plates to check
-python3 plate_checker.py --add "MYPLATE" "COOL1"
-
-# Use a specific plate style
-python3 plate_checker.py --plate-style black-white-premium-embossed
-
-# Show the browser window (useful for debugging)
-python3 plate_checker.py --no-headless
+# ── Options (work with any mode) ───────────────────────────
+python3 plate_checker.py --delay 3.0                                # Slower
+python3 plate_checker.py --add "MYPLATE" "COOL1"                    # Add custom plates
+python3 plate_checker.py --plate-style black-white-premium-embossed # Plate design
+python3 plate_checker.py --no-headless                              # Show browser
 ```
+
+### Two-Step Workflow
+
+1. **Generate** plate ideas from a paragraph describing your interests:
+   ```bash
+   ./run.sh --generate "Retired tech executive, Spanish heritage, Austin TX,
+   passionate about AI, Ethereum, and home automation"
+   ```
+   This creates `input.json` with 500 plate candidates scored by wow factor.
+
+2. **Check** availability on myplates.com:
+   ```bash
+   ./run.sh --input input.json --max-plates 100
+   ```
+   Results are saved to `results.json`, sorted by wow factor.
 
 ## How It Works
 

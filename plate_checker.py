@@ -23,7 +23,9 @@ Usage:
 import json
 import time
 import sys
+import re
 import argparse
+import itertools
 from datetime import datetime
 from collections import OrderedDict
 
@@ -270,6 +272,329 @@ def generate_plate_ideas():
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Paragraph-Based Plate Generator
+# ═══════════════════════════════════════════════════════════════
+
+STOP_WORDS = {
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "shall", "can", "this", "that",
+    "these", "those", "i", "me", "my", "we", "our", "you", "your", "he",
+    "she", "it", "they", "them", "its", "his", "her", "their", "who",
+    "whom", "which", "what", "where", "when", "how", "not", "no", "nor",
+    "as", "if", "so", "than", "too", "very", "just", "about", "also",
+    "into", "over", "such", "am", "up", "out", "like", "more", "most",
+    "own", "same", "other", "each", "every", "both", "few", "all", "any",
+    "some", "many", "much", "us", "been", "then", "there", "here",
+}
+
+LEET_MAP = {"A": "4", "E": "3", "I": "1", "O": "0", "S": "5", "T": "7", "B": "8"}
+
+NUMBER_SUBS = {
+    "one": "1", "won": "1", "two": "2", "to": "2", "too": "2",
+    "three": "3", "for": "4", "four": "4", "fore": "4", "five": "5",
+    "six": "6", "seven": "7", "ate": "8", "eight": "8", "nine": "9",
+    "ten": "10",
+}
+
+PLATE_SUFFIXES = ["R", "RX", "GUY", "MAN", "PRO", "GM", "TX", "1", "GO", "NUT"]
+PLATE_PREFIXES = ["MR", "DR", "TX", "MY", "GO", "LUV", "NO1"]
+
+
+def _extract_keywords(paragraph):
+    """Extract meaningful keywords from a paragraph."""
+    text = re.sub(r"[^\w\s-]", " ", paragraph.lower())
+    words = text.split()
+    keywords = []
+    seen = set()
+    for w in words:
+        w = w.strip("-_")
+        if w and w not in STOP_WORDS and len(w) >= 2 and w not in seen:
+            seen.add(w)
+            keywords.append(w)
+    return keywords
+
+
+def _drop_vowels(word):
+    """Remove vowels from a word, keeping the first letter."""
+    if len(word) <= 1:
+        return word
+    return word[0] + "".join(c for c in word[1:] if c.upper() not in "AEIOU")
+
+
+def _leetspeak(word):
+    """Apply leetspeak substitutions."""
+    return "".join(LEET_MAP.get(c.upper(), c) for c in word)
+
+
+def _partial_leet(word):
+    """Leetspeak only on vowels."""
+    return "".join(
+        LEET_MAP[c.upper()] if c.upper() in LEET_MAP and c.upper() in "AEIOU" else c
+        for c in word
+    )
+
+
+def _truncate_smart(word, max_len=7):
+    """Truncate at a consonant boundary for readability."""
+    word = word[:max_len]
+    if len(word) > 3 and word[-1].upper() in "AEIOU":
+        word = word[:-1]
+    return word[:max_len]
+
+
+def _score_plate(plate_text, technique_score=3):
+    """
+    Score a plate for wow factor (1–10).
+    Higher = more creative, readable, and likely available.
+    """
+    score = technique_score
+    text = plate_text.replace(" ", "")
+
+    # Length bonus: short plates are punchy
+    if len(text) <= 4:
+        score += 2
+    elif len(text) <= 5:
+        score += 1
+
+    # Readability: good vowel-to-consonant ratio
+    vowels = sum(1 for c in text if c in "AEIOU0134")  # digits that read as vowels
+    ratio = vowels / max(len(text), 1)
+    if 0.25 <= ratio <= 0.50:
+        score += 1
+
+    # Clever number+letter mix
+    has_num = any(c.isdigit() for c in text)
+    has_alpha = any(c.isalpha() for c in text)
+    if has_num and has_alpha:
+        score += 1
+
+    # Penalty: all consonants = unreadable
+    real_vowels = sum(1 for c in text if c in "AEIOU")
+    if real_vowels == 0 and len(text) > 4:
+        score -= 2
+
+    return max(1, min(10, score))
+
+
+def generate_plates_from_description(paragraph, target_count=500):
+    """
+    Generate vanity plate ideas from a freeform paragraph.
+
+    Uses truncation, vowel-dropping, leetspeak, word combinations,
+    prefixes/suffixes, and creative encoding to produce up to
+    target_count plates, sorted by wow factor.
+    """
+    keywords = _extract_keywords(paragraph)
+
+    if not keywords:
+        print("  Warning: No usable keywords found in description.")
+        return []
+
+    # Extract bigrams (adjacent non-stop-word pairs)
+    raw_words = [w.strip(".,!?;:\"'()") for w in paragraph.lower().split()]
+    bigrams = []
+    for i in range(len(raw_words) - 1):
+        a, b = raw_words[i], raw_words[i + 1]
+        if (a not in STOP_WORDS and b not in STOP_WORDS
+                and len(a) >= 2 and len(b) >= 2):
+            bigrams.append((a, b))
+
+    candidates = {}  # plate_text → dict
+
+    def add(plate, desc, tech_score=3):
+        p = plate.upper().strip()
+        cleaned = re.sub(r"[^A-Z0-9 .\-]", "", p)
+        if cleaned != p or len(p) > 7 or len(p) < 2:
+            return
+        if p not in candidates:
+            candidates[p] = {
+                "plate": p,
+                "description": desc,
+                "wow_score": _score_plate(p, tech_score),
+            }
+
+    # ── Per-keyword transforms ───────────────────────────────
+    for kw in keywords:
+        u = kw.upper()
+
+        add(u, kw.title(), 3)
+        add(_truncate_smart(u), f"{kw.title()} (abbr)", 4)
+        add(_drop_vowels(u), f"{kw.title()} (no vowels)", 5)
+        add(_leetspeak(u)[:7], f"{kw.title()} (leet)", 4)
+        add(_partial_leet(u)[:7], f"{kw.title()} (num sub)", 4)
+
+        # Compressed: first 3 + last letter
+        if len(u) > 4:
+            add(u[:3] + u[-1], f"{kw.title()} (short)", 5)
+            add(u[:4] + u[-1], f"{kw.title()} (short)", 4)
+
+        # Spaced in middle
+        if 4 <= len(u) <= 6:
+            mid = len(u) // 2
+            add(u[:mid] + " " + u[mid:], f"{kw.title()} (spaced)", 3)
+
+        # With suffixes
+        for sfx in PLATE_SUFFIXES:
+            room = 7 - len(sfx)
+            add(_drop_vowels(u)[:room] + sfx, f"{kw.title()} + {sfx}", 5)
+            add(u[:room] + sfx, f"{kw.title()} + {sfx}", 4)
+
+        # With prefixes
+        for pfx in PLATE_PREFIXES:
+            room = 7 - len(pfx)
+            add(pfx + u[:room], f"{pfx} + {kw.title()}", 4)
+            add(pfx + _drop_vowels(u)[:room], f"{pfx} + {kw.title()} (dv)", 5)
+
+        # Number substitutions within the word
+        for word, num in NUMBER_SUBS.items():
+            if word in kw:
+                add(kw.replace(word, num).upper()[:7], f"{kw.title()} ({word}→{num})", 6)
+
+    # ── Bigram transforms ────────────────────────────────────
+    for a, b in bigrams:
+        au, bu = a.upper(), b.upper()
+
+        add((au + bu)[:7], f"{a.title()} {b.title()}", 3)
+        add(au[0] + bu[:6], f"{a[0].upper()}.{b.title()}", 4)
+        add(au[:6] + bu[0], f"{a.title()}.{b[0].upper()}", 4)
+        add((_drop_vowels(au) + _drop_vowels(bu))[:7],
+            f"{a.title()} {b.title()} (dv)", 5)
+
+        # Split combos
+        for s1, s2 in [(3, 4), (4, 3), (3, 3), (2, 5), (5, 2), (2, 4), (4, 2)]:
+            if s1 + s2 <= 7:
+                add(au[:s1] + bu[:s2], f"{a.title()}+{b.title()}", 4)
+
+        # Vowel-dropped splits
+        add(_drop_vowels(au)[:3] + bu[:4], f"{a.title()}(dv)+{b.title()}", 5)
+        add(au[:4] + _drop_vowels(bu)[:3], f"{a.title()}+{b.title()}(dv)", 5)
+
+        # Spaced combos
+        for s1, s2 in [(3, 3), (2, 4), (4, 2), (2, 3), (3, 2)]:
+            if s1 + s2 + 1 <= 7:
+                add(au[:s1] + " " + bu[:s2], f"{a.title()} {b.title()}", 4)
+
+        # Leet combos
+        add(_leetspeak(au)[:3] + bu[:4], f"{a.title()}(l)+{b.title()}", 5)
+        add(au[:4] + _leetspeak(bu)[:3], f"{a.title()}+{b.title()}(l)", 5)
+
+    # ── Trigram transforms ───────────────────────────────────
+    for i in range(len(raw_words) - 2):
+        ws = [raw_words[j].strip(".,!?;:\"'()") for j in range(i, i + 3)]
+        if all(w not in STOP_WORDS and len(w) >= 2 for w in ws):
+            initials = "".join(w[0].upper() for w in ws)
+            add(initials, ".".join(w[0].upper() for w in ws), 6)
+            add(ws[0].upper()[:4] + initials[1:], f"{ws[0].title()} + initials", 5)
+
+            # 2+2+3 and 3+2+2 combos
+            for s1, s2, s3 in [(2, 2, 3), (3, 2, 2), (2, 3, 2)]:
+                if s1 + s2 + s3 <= 7:
+                    c = ws[0][:s1].upper() + ws[1][:s2].upper() + ws[2][:s3].upper()
+                    add(c, f"{ws[0].title()} {ws[1].title()} {ws[2].title()}", 5)
+
+    # ── Cross-keyword combinations (all pairs) ───────────────
+    kw_limit = min(len(keywords), 40)
+    for a, b in itertools.combinations(keywords[:kw_limit], 2):
+        au, bu = a.upper(), b.upper()
+        add((au[:3] + bu[:4])[:7], f"{a.title()}+{b.title()}", 3)
+        add((au[:4] + bu[:3])[:7], f"{a.title()}+{b.title()}", 3)
+        add((_drop_vowels(au)[:4] + _drop_vowels(bu)[:3])[:7],
+            f"{a.title()}+{b.title()} (dv)", 4)
+        add((au[:3] + " " + bu[:3])[:7], f"{a.title()} {b.title()}", 3)
+        add((au[0] + bu)[:7], f"{a[0].upper()}.{b.title()}", 4)
+        add((au + bu[0])[:7], f"{a.title()}.{b[0].upper()}", 4)
+        if len(candidates) >= target_count * 2:
+            break
+
+    # ── Digit suffix padding (if still under target) ─────────
+    if len(candidates) < target_count:
+        for plate in list(candidates.keys()):
+            if 3 <= len(plate) <= 6:
+                base = candidates[plate]
+                for n in "0123456789":
+                    add(plate + n, f"{base['description']}+{n}",
+                        max(1, base["wow_score"] - 1))
+                if len(candidates) >= target_count * 2:
+                    break
+
+    # ── Second-pass suffix padding with 2-digit ──────────────
+    if len(candidates) < target_count:
+        for plate in list(candidates.keys()):
+            if 3 <= len(plate) <= 5:
+                base = candidates[plate]
+                for n in ["01", "11", "22", "33", "42", "69", "77", "88", "99"]:
+                    add(plate + n, f"{base['description']}+{n}",
+                        max(1, base["wow_score"] - 2))
+                if len(candidates) >= target_count * 2:
+                    break
+
+    # Sort by wow factor, take top N
+    plates = sorted(candidates.values(), key=lambda x: (-x["wow_score"], x["plate"]))
+    plates = plates[:target_count]
+
+    result = []
+    for p in plates:
+        result.append({
+            "plate": p["plate"],
+            "description": p["description"],
+            "category": "Generated",
+            "uniqueness": max(1, min(5, (p["wow_score"] + 1) // 2)),
+            "wow_score": p["wow_score"],
+        })
+
+    return result
+
+
+def save_generated_plates(plates, output_file="input.json"):
+    """Save generated plates to a JSON file for later checking."""
+    output = {
+        "generated_at": datetime.now().isoformat(),
+        "total_plates": len(plates),
+        "plates": plates,
+    }
+    with open(output_file, "w") as f:
+        json.dump(output, f, indent=2)
+    return output_file
+
+
+def load_plates_from_file(input_file):
+    """Load plates from a JSON file (e.g., input.json from --generate)."""
+    with open(input_file, "r") as f:
+        data = json.load(f)
+
+    if isinstance(data, list):
+        raw_plates = data
+    elif "plates" in data:
+        raw_plates = data["plates"]
+    else:
+        raise ValueError(f"Unrecognized JSON format in {input_file}. "
+                         f"Expected a list or {{\"plates\": [...]}}.")
+
+    result = []
+    for p in raw_plates:
+        if isinstance(p, str):
+            result.append({
+                "plate": p.upper().strip(),
+                "description": "",
+                "category": "Input",
+                "uniqueness": 3,
+                "wow_score": 5,
+            })
+        elif isinstance(p, dict):
+            result.append({
+                "plate": p.get("plate", "").upper().strip(),
+                "description": p.get("description", ""),
+                "category": p.get("category", "Input"),
+                "uniqueness": p.get("uniqueness", 3),
+                "wow_score": p.get("wow_score", 5),
+            })
+
+    return [p for p in result if 2 <= len(p["plate"]) <= 7]
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Browser-Based Availability Checker (Playwright)
 # ═══════════════════════════════════════════════════════════════
 
@@ -415,6 +740,8 @@ def check_plates_batch(plates, plate_style=DEFAULT_STYLE, delay=DEFAULT_DELAY,
             result["description"] = plate_info["description"]
             result["category"] = plate_info["category"]
             result["uniqueness"] = plate_info["uniqueness"]
+            result["wow_score"] = plate_info.get("wow_score",
+                                                  plate_info["uniqueness"] * 2)
 
             if result["blocked"]:
                 consecutive_blocks += 1
@@ -512,9 +839,14 @@ def save_results(results, plates, plate_style, output_file="results.json"):
                 "plate": r["plate"],
                 "description": r.get("description", ""),
                 "category": r.get("category", ""),
+                "uniqueness": r.get("uniqueness", 3),
+                "wow_score": r.get("wow_score", 5),
                 "order_url": r.get("order_url", ""),
             }
-            for r in results["available"]
+            for r in sorted(results["available"],
+                            key=lambda x: (-x.get("wow_score", 0),
+                                           -x.get("uniqueness", 0),
+                                           x["plate"]))
         ],
         "unavailable_plates": [r["plate"] for r in results["unavailable"]],
         "errors": [
@@ -548,14 +880,20 @@ def print_results_summary(results):
     print(f"  Errors         : {len(results['errors'])}")
 
     if results["available"]:
+        # Sort by wow factor for display
+        ranked = sorted(results["available"],
+                        key=lambda x: (-x.get("wow_score", 0),
+                                       -x.get("uniqueness", 0),
+                                       x["plate"]))
         print(f"\n{'─' * 62}")
-        count = min(20, len(results["available"]))
-        print(f"  TOP {count} AVAILABLE PLATES")
+        count = min(20, len(ranked))
+        print(f"  TOP {count} AVAILABLE PLATES (by wow factor)")
         print(f"{'─' * 62}")
-        for j, r in enumerate(results["available"][:20], 1):
+        for j, r in enumerate(ranked[:20], 1):
             desc = r.get("description", "")
             cat = r.get("category", "")
-            print(f"  {j:2d}. {r['plate']:8s}  {desc:25s}  [{cat}]")
+            wow = r.get("wow_score", "?")
+            print(f"  {j:2d}. {r['plate']:8s}  {desc:25s}  [{cat}]  wow:{wow}")
             print(f"      Order: {r.get('order_url', 'N/A')}")
     else:
         print("\n  No available plates found in this batch.")
@@ -578,12 +916,14 @@ Setup:
   playwright install chromium
 
 Examples:
-  python3 plate_checker.py                     # Check all 130+ plates
-  python3 plate_checker.py --max-plates 30     # Check top 30 most unique
-  python3 plate_checker.py --delay 2.5         # Slower to avoid blocks
-  python3 plate_checker.py --list-only         # Preview plate ideas
-  python3 plate_checker.py --add "MY NAME"     # Add custom plate(s)
-  python3 plate_checker.py --no-headless       # Show the browser window
+  python3 plate_checker.py                                 # Check all built-in plates
+  python3 plate_checker.py --generate "I love AI and cars" # Generate 500 ideas → input.json
+  python3 plate_checker.py --input input.json              # Check plates from file
+  python3 plate_checker.py --max-plates 30                 # Check top 30 most unique
+  python3 plate_checker.py --delay 2.5                     # Slower to avoid blocks
+  python3 plate_checker.py --list-only                     # Preview plate ideas
+  python3 plate_checker.py --add "MY NAME"                 # Add custom plate(s)
+  python3 plate_checker.py --no-headless                   # Show the browser window
         """
     )
     parser.add_argument(
@@ -616,13 +956,49 @@ Examples:
         "--output", type=str, default="results.json",
         help="Output JSON file (default: results.json)"
     )
+    parser.add_argument(
+        "--generate", type=str, metavar="DESCRIPTION",
+        help="Generate 500 plate ideas from a paragraph description "
+             "and save to input.json. Does not check availability."
+    )
+    parser.add_argument(
+        "--input", type=str, metavar="FILE",
+        help="Load plates from a JSON file (e.g., input.json created "
+             "by --generate) instead of using built-in plate ideas"
+    )
 
     args = parser.parse_args()
 
     print(BANNER)
 
-    # Generate plate ideas
-    plates = generate_plate_ideas()
+    # ── Generate mode: create input.json and exit ─────────────
+    if args.generate:
+        print(f"  Generating plate ideas from description...\n")
+        print(f"  Description: \"{args.generate[:80]}{'...' if len(args.generate) > 80 else ''}\"\n")
+        plates = generate_plates_from_description(args.generate, target_count=500)
+        out = save_generated_plates(plates, "input.json")
+        print(f"  Generated {len(plates)} plate ideas.")
+        print(f"  Saved to: {out}")
+        print(f"\n  Next step: check availability with:")
+        print(f"    python3 plate_checker.py --input input.json")
+        print()
+
+        # Also show a preview of the top plates
+        top = plates[:15]
+        print(f"  Top {len(top)} plates by wow factor:")
+        print(f"  {'─' * 50}")
+        for i, p in enumerate(top, 1):
+            print(f"  {i:3d}. {p['plate']:8s}  wow:{p['wow_score']:2d}  {p['description']}")
+        print()
+        return
+
+    # ── Load plates from file or generate built-in list ───────
+    if args.input:
+        print(f"  Loading plates from: {args.input}")
+        plates = load_plates_from_file(args.input)
+        print(f"  Loaded {len(plates)} plates.\n")
+    else:
+        plates = generate_plate_ideas()
 
     # Add custom plates if provided
     if args.add:
@@ -635,6 +1011,7 @@ Examples:
                     "description": "Custom plate",
                     "category": "Custom",
                     "uniqueness": 5,
+                    "wow_score": 8,
                 })
 
     if args.list_only:
