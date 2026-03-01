@@ -3,10 +3,14 @@
 Generates personalized vanity plate ideas and checks their availability on
 [myplates.com](https://www.myplates.com) — Texas's official plate vendor.
 
+Uses **Playwright** (headless Chromium browser) to bypass myplates.com's
+Incapsula bot protection, which blocks raw HTTP requests with 403 errors.
+
 ## Quick Start
 
 ```bash
-# No dependencies needed — uses Python standard library only
+pip install playwright
+playwright install chromium
 python3 plate_checker.py
 ```
 
@@ -16,15 +20,15 @@ python3 plate_checker.py
   Leadership, Crypto, Aviation, and more)
 - **Uniqueness scoring** — plates sorted by likelihood of availability (most
   niche first)
+- **Playwright browser engine** — uses a real browser to bypass Incapsula WAF
 - **Rate-limited requests** — respects myplates.com with configurable delays
 - **Incapsula bot detection** — auto-stops when blocked, avoids bans
-- **Concurrent mode** — check multiple plates at once (use cautiously)
 - **JSON export** — full results saved to `results.json`
 
 ## Usage
 
 ```bash
-# Check all 131+ plates (takes ~4 minutes at default 1.5s delay)
+# Check all 131+ plates (takes ~5 minutes at default 1.5s delay)
 python3 plate_checker.py
 
 # Check the top 30 most unique/niche plates
@@ -42,24 +46,29 @@ python3 plate_checker.py --add "MYPLATE" "COOL1"
 # Use a specific plate style
 python3 plate_checker.py --plate-style black-white-premium-embossed
 
-# Check 2 plates concurrently (faster, but higher block risk)
-python3 plate_checker.py --concurrent 2
+# Show the browser window (useful for debugging)
+python3 plate_checker.py --no-headless
 ```
 
 ## How It Works
 
-The app queries the undocumented myplates.com API endpoint:
-```
-https://www.myplates.com/api/licenseplates/passenger/{style}/{plate-text}
-```
+The app uses Playwright to launch a headless Chromium browser that:
 
-If the response contains `"available`, the plate is available for purchase.
+1. **Visits myplates.com** first to establish cookies and pass Incapsula's
+   JavaScript challenges
+2. **Queries the API** endpoint for each plate:
+   ```
+   https://www.myplates.com/api/licenseplates/passenger/{style}/{plate-text}
+   ```
+3. **Parses the response** — if it contains `"available`, the plate is open
 
-**Important:** myplates.com uses Incapsula bot protection. The app uses
-Python's `urllib` (not `requests`) which avoids detection, per findings from
-the [txVanityPlateChecker](https://github.com/bestadamdagoat/txVanityPlateChecker)
-project. If you get blocked, try:
+This approach is necessary because myplates.com uses [Imperva Incapsula](https://www.imperva.com/products/bot-management/)
+bot protection, which blocks raw HTTP requests (urllib, requests, curl) with
+403 Forbidden errors. A real browser handles the JS challenges automatically.
+
+If you still get blocked, try:
 - Increasing `--delay` to 3-5 seconds
+- Using `--no-headless` to show the browser (sometimes helps)
 - Changing your IP / using a VPN
 - Waiting a few minutes before retrying
 

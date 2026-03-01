@@ -5,8 +5,12 @@ Texas Vanity Plate Checker
 Generates personalized vanity plate ideas and checks their availability
 on myplates.com (Texas's official plate vendor).
 
-Uses the myplates.com API endpoint discovered by the txVanityPlateChecker
-project: https://github.com/bestadamdagoat/txVanityPlateChecker
+Uses Playwright (headless browser) to handle myplates.com's Incapsula
+bot protection, which blocks raw HTTP/urllib requests with 403 errors.
+
+Setup:
+    pip install playwright
+    playwright install chromium
 
 Usage:
     python3 plate_checker.py                    # Check all plates
@@ -14,18 +18,13 @@ Usage:
     python3 plate_checker.py --delay 2.0        # Slower (safer)
     python3 plate_checker.py --list-only        # Just list plate ideas
     python3 plate_checker.py --add MYPLATE      # Add a custom plate to check
-    python3 plate_checker.py --concurrent 3     # Check 3 at a time
 """
 
-import urllib.request
-import urllib.error
 import json
 import time
 import sys
-import os
 import argparse
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 
 
@@ -47,14 +46,8 @@ API_BASE = "https://www.myplates.com/api/licenseplates/passenger"
 DESIGN_BASE = "https://www.myplates.com/design/personalized/passenger"
 
 DEFAULT_DELAY = 1.5
-MAX_CONSECUTIVE_BLOCKS = 3
-REQUEST_TIMEOUT = 15
-
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/122.0.0.0 Safari/537.36"
-)
+MAX_CONSECUTIVE_BLOCKS = 5
+REQUEST_TIMEOUT = 20000  # milliseconds for Playwright
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -277,18 +270,62 @@ def generate_plate_ideas():
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Availability Checker
+#  Browser-Based Availability Checker (Playwright)
 # ═══════════════════════════════════════════════════════════════
 
-def check_plate_availability(plate_text, plate_style=DEFAULT_STYLE):
+def create_browser_checker(plate_style=DEFAULT_STYLE, headless=True):
     """
-    Check plate availability via the myplates.com API.
+    Create a Playwright browser context for checking plates.
 
-    The API returns HTML/JSON where the presence of '"available' in the
-    response body indicates the plate is available.
+    Returns (playwright, browser, page) tuple. Caller must close them.
 
-    Uses urllib instead of requests to avoid Incapsula bot detection
-    (per the txVanityPlateChecker project's findings).
+    Uses a real Chromium browser to bypass Incapsula bot protection,
+    which blocks raw HTTP requests (urllib/requests) with 403 errors.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("\n  Playwright is required but not installed.")
+        print("  Install it with:")
+        print("    pip install playwright")
+        print("    playwright install chromium")
+        sys.exit(1)
+
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=headless)
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 720},
+    )
+    page = context.new_page()
+
+    # Warm up: visit the homepage first to establish cookies and
+    # pass any JavaScript challenges from Incapsula
+    print("  Initializing browser session...")
+    try:
+        page.goto("https://www.myplates.com/", timeout=REQUEST_TIMEOUT,
+                   wait_until="domcontentloaded")
+        # Give Incapsula JS time to set cookies
+        page.wait_for_timeout(3000)
+        print("  Browser session ready.\n")
+    except Exception as e:
+        print(f"  Warning: Homepage load issue: {e}")
+        print("  Continuing anyway...\n")
+
+    return pw, browser, page
+
+
+def check_plate_browser(page, plate_text, plate_style=DEFAULT_STYLE):
+    """
+    Check a single plate's availability using the browser page.
+
+    Navigates to the API endpoint (which the browser can access since
+    it has valid cookies/session from the homepage visit) and checks
+    if the response contains '"available'.
     """
     result = {
         "plate": plate_text,
@@ -301,73 +338,71 @@ def check_plate_availability(plate_text, plate_style=DEFAULT_STYLE):
     api_url = f"{API_BASE}/{plate_style}/{plate_text}"
 
     try:
-        req = urllib.request.Request(api_url)
-        req.add_header("User-Agent", USER_AGENT)
-        req.add_header("Accept", "text/html,application/xhtml+xml,application/json,*/*")
-        req.add_header("Accept-Language", "en-US,en;q=0.9")
-        req.add_header("Accept-Encoding", "identity")
-        req.add_header("Connection", "keep-alive")
-        req.add_header("Referer", "https://www.myplates.com/")
+        response = page.goto(api_url, timeout=REQUEST_TIMEOUT,
+                             wait_until="domcontentloaded")
 
-        response = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
-        data = response.read()
-
-        # Check for Incapsula bot protection block
-        if b"incapsula" in data.lower() or b"_Incapsula_" in data:
-            result["blocked"] = True
-            result["error"] = "Blocked by Incapsula bot protection"
+        if response is None:
+            result["error"] = "No response received"
             return result
 
-        # Parse availability from response
-        if b'"available' in data:
+        status = response.status
+
+        if status == 403:
+            # Try reading body - might be Incapsula challenge page
+            body = page.content()
+            if "incapsula" in body.lower() or "_Incapsula_" in body:
+                result["blocked"] = True
+                result["error"] = "Blocked by Incapsula"
+            else:
+                result["error"] = f"HTTP 403 Forbidden"
+            return result
+
+        if status != 200:
+            result["error"] = f"HTTP {status}"
+            return result
+
+        # Read the page body text
+        body = page.content()
+
+        if "incapsula" in body.lower():
+            result["blocked"] = True
+            result["error"] = "Blocked by Incapsula"
+            return result
+
+        # Check availability from API response
+        if '"available' in body:
             result["available"] = True
         else:
             result["available"] = False
 
-    except urllib.error.HTTPError as e:
-        result["error"] = f"HTTP {e.code}: {e.reason}"
-    except urllib.error.URLError as e:
-        reason = str(e.reason)
-        if "Tunnel connection failed" in reason or "host_not_allowed" in reason:
-            result["error"] = "Network restricted (run locally for full access)"
-        elif "name resolution" in reason:
-            result["error"] = "DNS blocked (run locally for full access)"
-        else:
-            result["error"] = f"Connection error: {reason[:60]}"
     except Exception as e:
-        result["error"] = f"{type(e).__name__}: {str(e)[:60]}"
+        error_msg = str(e)
+        if "timeout" in error_msg.lower():
+            result["error"] = "Request timed out"
+        else:
+            result["error"] = f"{type(e).__name__}: {error_msg[:60]}"
 
     return result
 
 
 def check_plates_batch(plates, plate_style=DEFAULT_STYLE, delay=DEFAULT_DELAY,
-                       concurrent=1, stop_on_block=True):
+                       headless=True):
     """
-    Check a batch of plates with rate limiting and optional concurrency.
-
-    Args:
-        plates: list of plate idea dicts from generate_plate_ideas()
-        plate_style: myplates.com style slug
-        delay: seconds between requests
-        concurrent: number of concurrent requests (use 1 to be safe)
-        stop_on_block: stop after MAX_CONSECUTIVE_BLOCKS Incapsula blocks
-
-    Returns:
-        dict with available, unavailable, blocked, and error lists
+    Check a batch of plates using Playwright browser.
     """
     results = {
         "available": [],
         "unavailable": [],
         "blocked": [],
         "errors": [],
+        "stopped_early": False,
     }
     consecutive_blocks = 0
-    stopped_early = False
-
     total = len(plates)
 
-    if concurrent <= 1:
-        # Sequential mode (safest for avoiding blocks)
+    pw, browser, page = create_browser_checker(plate_style, headless)
+
+    try:
         for i, plate_info in enumerate(plates, 1):
             plate = plate_info["plate"]
             sys.stdout.write(
@@ -376,7 +411,7 @@ def check_plates_batch(plates, plate_style=DEFAULT_STYLE, delay=DEFAULT_DELAY,
             )
             sys.stdout.flush()
 
-            result = check_plate_availability(plate, plate_style)
+            result = check_plate_browser(page, plate, plate_style)
             result["description"] = plate_info["description"]
             result["category"] = plate_info["category"]
             result["uniqueness"] = plate_info["uniqueness"]
@@ -385,26 +420,18 @@ def check_plates_batch(plates, plate_style=DEFAULT_STYLE, delay=DEFAULT_DELAY,
                 consecutive_blocks += 1
                 results["blocked"].append(result)
                 sys.stdout.write("BLOCKED\n")
-                if stop_on_block and consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS:
+                if consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS:
                     print(f"\n  Stopped: {MAX_CONSECUTIVE_BLOCKS} consecutive "
-                          f"Incapsula blocks. Try increasing --delay or "
-                          f"changing your IP.")
-                    stopped_early = True
+                          f"Incapsula blocks.")
+                    print("  Try: --delay 3 or --no-headless (visible browser)")
+                    results["stopped_early"] = True
                     break
+                # Wait longer after a block
+                page.wait_for_timeout(5000)
             elif result["error"]:
                 results["errors"].append(result)
                 sys.stdout.write(f"ERROR: {result['error'][:45]}\n")
                 consecutive_blocks = 0
-                # If all errors are network-related, stop early
-                if len(results["errors"]) >= 3 and all(
-                    "Network restricted" in e.get("error", "") or
-                    "DNS blocked" in e.get("error", "")
-                    for e in results["errors"][-3:]
-                ):
-                    print(f"\n  Network is restricted. Please run this "
-                          f"script on your local machine.")
-                    stopped_early = True
-                    break
             elif result["available"]:
                 results["available"].append(result)
                 sys.stdout.write("AVAILABLE!\n")
@@ -415,48 +442,12 @@ def check_plates_batch(plates, plate_style=DEFAULT_STYLE, delay=DEFAULT_DELAY,
                 consecutive_blocks = 0
 
             if i < total:
-                time.sleep(delay)
-    else:
-        # Concurrent mode (faster but higher risk of blocks)
-        with ThreadPoolExecutor(max_workers=concurrent) as executor:
-            futures = {}
-            for plate_info in plates:
-                future = executor.submit(
-                    check_plate_availability,
-                    plate_info["plate"],
-                    plate_style,
-                )
-                futures[future] = plate_info
+                # Use Playwright's wait instead of time.sleep for consistency
+                page.wait_for_timeout(int(delay * 1000))
+    finally:
+        browser.close()
+        pw.stop()
 
-            done_count = 0
-            for future in as_completed(futures):
-                done_count += 1
-                plate_info = futures[future]
-                result = future.result()
-                result["description"] = plate_info["description"]
-                result["category"] = plate_info["category"]
-                result["uniqueness"] = plate_info["uniqueness"]
-
-                plate = result["plate"]
-                sys.stdout.write(
-                    f"\r  [{done_count:3d}/{total}] {plate:8s}: "
-                )
-                sys.stdout.flush()
-
-                if result["blocked"]:
-                    results["blocked"].append(result)
-                    sys.stdout.write("BLOCKED\n")
-                elif result["error"]:
-                    results["errors"].append(result)
-                    sys.stdout.write(f"ERROR\n")
-                elif result["available"]:
-                    results["available"].append(result)
-                    sys.stdout.write("AVAILABLE!\n")
-                else:
-                    results["unavailable"].append(result)
-                    sys.stdout.write("Taken\n")
-
-    results["stopped_early"] = stopped_early
     return results
 
 
@@ -569,8 +560,7 @@ def print_results_summary(results):
     else:
         print("\n  No available plates found in this batch.")
         if results["errors"]:
-            print("  (This may be due to network restrictions. "
-                  "Try running locally.)")
+            print("  Check the errors above for details.")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -583,15 +573,17 @@ def main():
                     "Check plate availability on myplates.com",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Setup:
+  pip install playwright
+  playwright install chromium
+
 Examples:
-  python3 plate_checker.py                     # Check all 160+ plates
+  python3 plate_checker.py                     # Check all 130+ plates
   python3 plate_checker.py --max-plates 30     # Check top 30 most unique
   python3 plate_checker.py --delay 2.5         # Slower to avoid blocks
   python3 plate_checker.py --list-only         # Preview plate ideas
   python3 plate_checker.py --add "MY NAME"     # Add custom plate(s)
-  python3 plate_checker.py --concurrent 2      # Check 2 at a time
-
-Plate API: https://www.myplates.com/api/licenseplates/passenger/{style}/{plate}
+  python3 plate_checker.py --no-headless       # Show the browser window
         """
     )
     parser.add_argument(
@@ -617,8 +609,8 @@ Plate API: https://www.myplates.com/api/licenseplates/passenger/{style}/{plate}
         help="Add custom plate text(s) to check"
     )
     parser.add_argument(
-        "--concurrent", type=int, default=1,
-        help="Concurrent requests (default: 1, safest)"
+        "--no-headless", action="store_true",
+        help="Show the browser window (useful for debugging blocks)"
     )
     parser.add_argument(
         "--output", type=str, default="results.json",
@@ -664,7 +656,7 @@ Plate API: https://www.myplates.com/api/licenseplates/passenger/{style}/{plate}
     print(f"  Max Chars   : {max_chars}")
     print(f"  Checking    : {len(plates)} plates")
     print(f"  Delay       : {args.delay}s between requests")
-    print(f"  Concurrent  : {args.concurrent}")
+    print(f"  Browser     : {'visible' if args.no_headless else 'headless'}")
     print(f"  Started     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  {'─' * 58}")
 
@@ -673,7 +665,7 @@ Plate API: https://www.myplates.com/api/licenseplates/passenger/{style}/{plate}
         plates,
         plate_style=args.plate_style,
         delay=args.delay,
-        concurrent=args.concurrent,
+        headless=not args.no_headless,
     )
 
     # Print summary
